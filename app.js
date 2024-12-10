@@ -20,6 +20,7 @@ mongoose
   .then(() => {
     logger.info("connected to database");
     require("./Domain");
+    require("./Action");
 
     // worker setup
     require("./worker")();

@@ -9,6 +9,7 @@ const disallowedValues = [
   "undefined",
   "n/a",
 ];
+const Action = require("./Action");
 
 const filterNullValuesFromObject = (object) =>
   Object.fromEntries(
@@ -30,12 +31,40 @@ const normalizePropertyName = (key) =>
     .replace(/^_+|_+$/g, "")
     .replace(/_+/g, "_");
 
-const goal = (actions) => {
-  // this is where the data will be written to the database
+const goal = async (actions) => {
+  try {
+    const actionsByType = actions.reduce((acc, action) => {
+      const type = action.actionName.split(" ")[0].toLowerCase();
+      if (!acc[type]) acc[type] = [];
+      acc[type].push(action);
+      return acc;
+    }, {});
 
-  logger.info("Goal", {
-    actions,
-  });
+    for (const [type, typeActions] of Object.entries(actionsByType)) {
+      logger.info(`Processing ${typeActions.length} ${type} actions`);
+
+      const formattedActions = typeActions.map((action) => ({
+        type: action.actionName,
+        timestamp: new Date(action.actionDate),
+        properties: filterNullValuesFromObject({
+          ...action.meetingProperties,
+          ...action.companyProperties,
+          ...action.userProperties,
+        }),
+        identity: action.identity,
+        includeInAnalytics: action.includeInAnalytics,
+      }));
+
+      await Action.insertMany(formattedActions);
+    }
+  } catch (error) {
+    logger.error("Error processing actions in goal", {
+      error: error.message,
+      stack: error.stack,
+      actionsCount: actions.length,
+    });
+    throw error;
+  }
 };
 
 module.exports = {

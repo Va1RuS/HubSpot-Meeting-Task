@@ -21,7 +21,8 @@ const generateLastModifiedDateFilter = (
   const lastModifiedDateFilter = date
     ? {
         filters: [
-          { propertyName, operator: "GTE", value: `${date.valueOf()}` },
+          // { propertyName, operator: "GTE", value: `${date.valueOf()}` },
+          { propertyName, operator: "GTE", value: "2023-03-19" },
           { propertyName, operator: "LTE", value: `${nowDate.valueOf()}` },
         ],
       }
@@ -46,12 +47,9 @@ const retryApiCall = async (apiCall, domain, hubId, maxRetries = 4) => {
   while (tryCount <= maxRetries) {
     try {
       const result = await apiCall();
-      logger.info("Api call success, received result", {
-        metadata: { operation: "retryApiCall" },
-        result,
-      });
       return result;
     } catch (err) {
+      logger.warn("Api call failed, retrying...");
       tryCount++;
 
       if (new Date() > expirationDate) {
@@ -118,7 +116,6 @@ const processCompanies = async (domain, hubId, q) => {
   );
   const lastPulledDate = new Date(account.lastPulledDates.companies);
   const now = new Date();
-  now.setDate(now.getDate() - 10);
 
   let hasMore = true;
   const offsetObject = {};
@@ -211,7 +208,6 @@ const processContacts = async (domain, hubId, q) => {
   );
   const lastPulledDate = new Date(account.lastPulledDates.contacts);
   const now = new Date();
-  now.setDate(now.getDate() - 10);
 
   let hasMore = true;
   const offsetObject = {};
@@ -348,7 +344,6 @@ const processMeetings = async (domain, hubId, q) => {
   );
   const lastPulledDate = new Date(account.lastPulledDates.meetings);
   const now = new Date();
-  now.setDate(now.getDate() - 50);
 
   let hasMore = true;
   const offsetObject = {};
@@ -387,19 +382,18 @@ const processMeetings = async (domain, hubId, q) => {
       throw new Error("Failed to fetch meetings. Aborting.");
     }
 
-    const data = searchResult?.results || [];
+    const meetings = searchResult?.results || [];
     logger.info("fetch meeting batch");
 
     offsetObject.after = parseInt(searchResult?.paging?.next?.after);
 
-    // Fetch associated contacts
     const meetingToContactMap = await fetchAssociatedContacts(
-      data,
+      meetings,
       domain,
       hubId
     );
 
-    data.forEach((meeting) => {
+    meetings.forEach((meeting) => {
       if (!meeting.properties) return;
 
       const actionTemplate = {
@@ -445,50 +439,51 @@ const processMeetings = async (domain, hubId, q) => {
 };
 
 const fetchAssociatedContacts = async (meetings, domain, hubId) => {
-  const meetingIds = meetings.map((meeting) => meeting.id);
-  const contactAssociationsResults = await retryApiCall(
-    () =>
-      hubspotClient.apiRequest({
-        method: "post",
-        path: "/crm/v3/associations/MEETINGS/CONTACTS/batch/read",
-        body: {
-          inputs: meetingIds.map((meetingId) => ({
-            id: meetingId,
-          })),
-        },
-      }),
-    domain,
-    hubId
-  );
-
-  const associatedContactIds = contactAssociationsResults.results
-    .map((result) => result.to?.[0]?.id)
-    .filter((id) => id);
-
-  const contactDetails =
-    associatedContactIds.length > 0
-      ? await retryApiCall(
-          () =>
-            hubspotClient.crm.contacts.batchApi.read({
-              inputs: associatedContactIds.map((id) => ({ id })),
-              properties: ["email"],
-            }),
-          domain,
-          hubId
-        )
-      : { results: [] };
+  logger.info(`fetching associated contacts for ${meetings.length} meetings`);
 
   const meetingToContactMap = {};
-  contactAssociationsResults.results.forEach((assoc) => {
-    if (assoc.to?.[0]?.id) {
-      const contactResult = contactDetails.results.find(
-        (contact) => contact.id === assoc.to[0].id
+
+  for (const meeting of meetings) {
+    logger.info(
+      `fetching associated contacts for meeting with id ${meeting.id}`
+    );
+    try {
+      // Use retryApiCall for fetching associations
+      const response = await retryApiCall(
+        () =>
+          hubspotClient.crm.objects.meetings.associationsApi.getAll(
+            meeting.id,
+            "contacts"
+          ),
+        domain,
+        hubId
       );
-      if (contactResult?.properties?.email) {
-        meetingToContactMap[assoc.from.id] = contactResult.properties.email;
+
+      if (response.results?.length > 0) {
+        const contactId = response.results[0].toObjectId;
+
+        // Use retryApiCall for fetching contact details
+        const contact = await retryApiCall(
+          () =>
+            hubspotClient.crm.contacts.basicApi.getById(contactId, ["email"]),
+          domain,
+          hubId
+        );
+
+        if (contact.properties?.email) {
+          meetingToContactMap[meeting.id] = contact.properties.email;
+        }
       }
+    } catch (error) {
+      logger.info("Error fetching associated contact", {
+        metadata: {
+          operation: "fetchAssociatedContacts",
+          meetingId: meeting.id,
+        },
+        error,
+      });
     }
-  });
+  }
 
   return meetingToContactMap;
 };
@@ -516,7 +511,7 @@ const drainQueue = async (domain, actions, q) => {
   if (q.length() > 0) await q.drain();
 
   if (actions.length > 0) {
-    goal(actions);
+    await goal(actions);
   }
 
   return true;
@@ -543,8 +538,8 @@ const pullDataFromHubspot = async () => {
     const q = createQueue(domain, actions);
 
     try {
-      await processContacts(domain, account.hubId, q);
       logger.info("process contacts");
+      await processContacts(domain, account.hubId, q);
     } catch (err) {
       logger.info(err, {
         apiKey: domain.apiKey,
@@ -553,8 +548,8 @@ const pullDataFromHubspot = async () => {
     }
 
     try {
-      await processCompanies(domain, account.hubId, q);
       logger.info("process companies");
+      await processCompanies(domain, account.hubId, q);
     } catch (err) {
       logger.info(err, {
         apiKey: domain.apiKey,
@@ -563,8 +558,8 @@ const pullDataFromHubspot = async () => {
     }
 
     try {
-      await processMeetings(domain, account.hubId, q);
       logger.info("process meetings");
+      await processMeetings(domain, account.hubId, q);
     } catch (err) {
       logger.info(err, {
         apiKey: domain.apiKey,
