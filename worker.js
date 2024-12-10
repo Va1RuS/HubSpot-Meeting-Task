@@ -1,5 +1,5 @@
 const hubspot = require("@hubspot/api-client");
-const { queue } = require("async");
+const { queue, log } = require("async");
 const _ = require("lodash");
 const mongoose = require("mongoose");
 const logger = require("./logger");
@@ -39,40 +39,6 @@ const saveDomain = async (domain) => {
 };
 
 /**
- * Get access token from HubSpot
- */
-const refreshAccessToken = async (domain, hubId, tryCount) => {
-  const { HUBSPOT_CID, HUBSPOT_CS } = process.env;
-  const account = domain.integrations.hubspot.accounts.find(
-    (account) => account.hubId === hubId
-  );
-  const { accessToken, refreshToken } = account;
-
-  return hubspotClient.oauth.tokensApi
-    .createToken(
-      "refresh_token",
-      undefined,
-      undefined,
-      HUBSPOT_CID,
-      HUBSPOT_CS,
-      refreshToken
-    )
-    .then(async (result) => {
-      const body = result.body ? result.body : result;
-
-      const newAccessToken = body.accessToken;
-      expirationDate = new Date(body.expiresIn * 1000 + new Date().getTime());
-
-      hubspotClient.setAccessToken(newAccessToken);
-      if (newAccessToken !== accessToken) {
-        account.accessToken = newAccessToken;
-      }
-
-      return true;
-    });
-};
-
-/**
  * Retry API call
  */
 const retryApiCall = async (apiCall, domain, hubId, maxRetries = 4) => {
@@ -80,13 +46,12 @@ const retryApiCall = async (apiCall, domain, hubId, maxRetries = 4) => {
   while (tryCount <= maxRetries) {
     try {
       const result = await apiCall();
+      logger.info("Api call success, received result", {
+        metadata: { operation: "retryApiCall" },
+        result,
+      });
       return result;
     } catch (err) {
-      logger.warn(err, {
-        apiKey: domain.apiKey,
-        metadata: { operation: "retryApiCall", hubId, tryCount },
-      });
-
       tryCount++;
 
       if (new Date() > expirationDate) {
@@ -104,6 +69,44 @@ const retryApiCall = async (apiCall, domain, hubId, maxRetries = 4) => {
       );
     }
   }
+};
+
+/**
+ * Get access token from HubSpot
+ */
+const refreshAccessToken = async (domain, hubId, tryCount = 2) => {
+  const { HUBSPOT_CID, HUBSPOT_CS } = process.env;
+  const account = domain.integrations.hubspot.accounts.find(
+    (account) => account.hubId === hubId
+  );
+  const { refreshToken } = account;
+
+  // Only wrap the token creation call with retryApiCall
+  const result = await retryApiCall(
+    () =>
+      hubspotClient.oauth.tokensApi.createToken(
+        "refresh_token",
+        undefined,
+        undefined,
+        HUBSPOT_CID,
+        HUBSPOT_CS,
+        refreshToken
+      ),
+    domain,
+    hubId,
+    tryCount
+  );
+
+  const body = result.body ? result.body : result;
+  const newAccessToken = body.accessToken;
+  expirationDate = new Date(body.expiresIn * 1000 + new Date().getTime());
+
+  hubspotClient.setAccessToken(newAccessToken);
+  if (newAccessToken !== account.accessToken) {
+    account.accessToken = newAccessToken;
+  }
+
+  return true;
 };
 
 /**
@@ -345,7 +348,7 @@ const processMeetings = async (domain, hubId, q) => {
   );
   const lastPulledDate = new Date(account.lastPulledDates.meetings);
   const now = new Date();
-  now.setDate(now.getDate() - 10);
+  now.setDate(now.getDate() - 50);
 
   let hasMore = true;
   const offsetObject = {};
@@ -389,6 +392,13 @@ const processMeetings = async (domain, hubId, q) => {
 
     offsetObject.after = parseInt(searchResult?.paging?.next?.after);
 
+    // Fetch associated contacts
+    const meetingToContactMap = await fetchAssociatedContacts(
+      data,
+      domain,
+      hubId
+    );
+
     data.forEach((meeting) => {
       if (!meeting.properties) return;
 
@@ -403,6 +413,8 @@ const processMeetings = async (domain, hubId, q) => {
           meeting_end_time: meeting.properties.hs_meeting_end_time,
           meeting_outcome: meeting.properties.hs_meeting_outcome,
         }),
+        // Add contact email if available
+        identity: meetingToContactMap[meeting.id] || null,
       };
 
       const isCreated =
@@ -430,6 +442,55 @@ const processMeetings = async (domain, hubId, q) => {
   await saveDomain(domain);
 
   return true;
+};
+
+const fetchAssociatedContacts = async (meetings, domain, hubId) => {
+  const meetingIds = meetings.map((meeting) => meeting.id);
+  const contactAssociationsResults = await retryApiCall(
+    () =>
+      hubspotClient.apiRequest({
+        method: "post",
+        path: "/crm/v3/associations/MEETINGS/CONTACTS/batch/read",
+        body: {
+          inputs: meetingIds.map((meetingId) => ({
+            id: meetingId,
+          })),
+        },
+      }),
+    domain,
+    hubId
+  );
+
+  const associatedContactIds = contactAssociationsResults.results
+    .map((result) => result.to?.[0]?.id)
+    .filter((id) => id);
+
+  const contactDetails =
+    associatedContactIds.length > 0
+      ? await retryApiCall(
+          () =>
+            hubspotClient.crm.contacts.batchApi.read({
+              inputs: associatedContactIds.map((id) => ({ id })),
+              properties: ["email"],
+            }),
+          domain,
+          hubId
+        )
+      : { results: [] };
+
+  const meetingToContactMap = {};
+  contactAssociationsResults.results.forEach((assoc) => {
+    if (assoc.to?.[0]?.id) {
+      const contactResult = contactDetails.results.find(
+        (contact) => contact.id === assoc.to[0].id
+      );
+      if (contactResult?.properties?.email) {
+        meetingToContactMap[assoc.from.id] = contactResult.properties.email;
+      }
+    }
+  });
+
+  return meetingToContactMap;
 };
 
 const createQueue = (domain, actions) =>
