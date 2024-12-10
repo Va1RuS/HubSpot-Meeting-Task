@@ -33,7 +33,7 @@ const generateLastModifiedDateFilter = (
 
 const saveDomain = async (domain) => {
   // disable this for testing purposes
-  return;
+  // return;
 
   domain.markModified("integrations.hubspot.accounts");
   await domain.save();
@@ -582,7 +582,8 @@ const pullDataFromHubspot = async () => {
     logger.info("finish processing account");
   }
 
-  process.exit();
+  logger.info("finished pulling data from HubSpot");
+  return true;
 };
 
 module.exports = pullDataFromHubspot;
