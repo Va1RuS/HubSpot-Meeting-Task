@@ -73,6 +73,40 @@ const refreshAccessToken = async (domain, hubId, tryCount) => {
 };
 
 /**
+ * Retry API call
+ */
+const retryApiCall = async (apiCall, domain, hubId, maxRetries = 4) => {
+  let tryCount = 0;
+  while (tryCount <= maxRetries) {
+    try {
+      const result = await apiCall();
+      return result;
+    } catch (err) {
+      logger.warn(err, {
+        apiKey: domain.apiKey,
+        metadata: { operation: "retryApiCall", hubId, tryCount },
+      });
+
+      tryCount++;
+
+      if (new Date() > expirationDate) {
+        await refreshAccessToken(domain, hubId);
+      }
+
+      if (tryCount > maxRetries) {
+        throw new Error(
+          `Failed to execute API call after ${maxRetries} retries`
+        );
+      }
+
+      await new Promise((resolve) =>
+        setTimeout(resolve, 5000 * Math.pow(2, tryCount))
+      );
+    }
+  }
+};
+
+/**
  * Get recently modified companies as 100 companies per page
  */
 const processCompanies = async (domain, hubId, q) => {
@@ -110,29 +144,15 @@ const processCompanies = async (domain, hubId, q) => {
       after: offsetObject.after,
     };
 
-    let searchResult = {};
+    const searchResult = await retryApiCall(
+      () => hubspotClient.crm.companies.searchApi.doSearch(searchObject),
+      domain,
+      hubId
+    );
 
-    let tryCount = 0;
-    while (tryCount <= 4) {
-      try {
-        searchResult = await hubspotClient.crm.companies.searchApi.doSearch(
-          searchObject
-        );
-        break;
-      } catch (err) {
-        tryCount++;
-
-        if (new Date() > expirationDate)
-          await refreshAccessToken(domain, hubId);
-
-        await new Promise((resolve, reject) =>
-          setTimeout(resolve, 5000 * Math.pow(2, tryCount))
-        );
-      }
+    if (!searchResult) {
+      throw new Error("Failed to fetch companies. Aborting.");
     }
-
-    if (!searchResult)
-      throw new Error("Failed to fetch companies for the 4th time. Aborting.");
 
     const data = searchResult?.results || [];
     offsetObject.after = parseInt(searchResult?.paging?.next?.after);
@@ -218,29 +238,15 @@ const processContacts = async (domain, hubId, q) => {
       after: offsetObject.after,
     };
 
-    let searchResult = {};
+    const searchResult = await retryApiCall(
+      () => hubspotClient.crm.contacts.searchApi.doSearch(searchObject),
+      domain,
+      hubId
+    );
 
-    let tryCount = 0;
-    while (tryCount <= 4) {
-      try {
-        searchResult = await hubspotClient.crm.contacts.searchApi.doSearch(
-          searchObject
-        );
-        break;
-      } catch (err) {
-        tryCount++;
-
-        if (new Date() > expirationDate)
-          await refreshAccessToken(domain, hubId);
-
-        await new Promise((resolve, reject) =>
-          setTimeout(resolve, 5000 * Math.pow(2, tryCount))
-        );
-      }
+    if (!searchResult) {
+      throw new Error("Failed to fetch contacts. Aborting.");
     }
-
-    if (!searchResult)
-      throw new Error("Failed to fetch contacts for the 4th time. Aborting.");
 
     const data = searchResult.results || [];
 
@@ -368,29 +374,15 @@ const processMeetings = async (domain, hubId, q) => {
       after: offsetObject.after,
     };
 
-    let searchResult = {};
+    const searchResult = await retryApiCall(
+      () => hubspotClient.crm.objects.meetings.searchApi.doSearch(searchObject),
+      domain,
+      hubId
+    );
 
-    let tryCount = 0;
-    while (tryCount <= 4) {
-      try {
-        searchResult = await hubspotClient.crm.meetings.searchApi.doSearch(
-          searchObject
-        );
-        break;
-      } catch (err) {
-        tryCount++;
-
-        if (new Date() > expirationDate)
-          await refreshAccessToken(domain, hubId);
-
-        await new Promise((resolve, reject) =>
-          setTimeout(resolve, 5000 * Math.pow(2, tryCount))
-        );
-      }
+    if (!searchResult) {
+      throw new Error("Failed to fetch meetings. Aborting.");
     }
-
-    if (!searchResult)
-      throw new Error("Failed to fetch meetings for the 4th time. Aborting.");
 
     const data = searchResult?.results || [];
     logger.info("fetch meeting batch");
